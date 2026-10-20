@@ -57,6 +57,15 @@ This enhanced release introduces comprehensive hardware diagnostics, multi-layou
 
 ---
 
+## 🚀 Live demo
+
+**→ (https://keyboardtest.unixkomputer.com/)**
+
+> Tip: some keys (Win/Meta, PrtSc, certain F-keys) may be intercepted by your OS or browser before
+> the page can see them — that's expected behavior, not a dead key.
+
+---
+
 ## 🛠️ Project Structure
 
 A clean, **zero-build static architecture**:
