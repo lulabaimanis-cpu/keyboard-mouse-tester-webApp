@@ -3,7 +3,7 @@
  * Strategy: cache-first for our own static assets, network fallback.
  * Bump CACHE when you change any precached file.
  */
-const CACHE = 'kmt-v2.0.0';
+const CACHE = 'kmt-v2.3.0';
 const ASSETS = [
   './',
   './index.html',

@@ -145,22 +145,33 @@
      ================================================================= */
   const Keyboard = {
     pressed: new Set(),
+    layout: localStorage.getItem('kmt.layout') || 'ansi',
+    holdTimers: new Map(),
+    repeatCounts: new Map(),
+    pressTimes: new Map(),
+    lastReleaseTimes: new Map(),
+    chattered: new Set(),
+    jammed: new Set(),
+    lastEscPress: 0,
+    ro: null,
+
     PREVENT: new Set([
       'Space', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
       'PageUp', 'PageDown', 'Home', 'End', 'Backspace', 'Quote', 'Slash',
+      'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12',
+      'ContextMenu',
+    ]),
+
+    SHORTCUT_CODES: new Set([
+      'KeyR', 'KeyS', 'KeyP', 'KeyF', 'KeyG', 'KeyH', 'KeyJ', 'KeyO', 'KeyU',
     ]),
 
     build() {
-      // ----- main block (function row + 5 rows) -----
-      const main = $('#kb-main');
-      MAIN_ROWS.forEach((row, i) => {
-        const rowEl = el('div', { class: 'kb-row' + (i === 0 ? ' fn-row' : '') });
-        row.forEach((def) => rowEl.append(this.cap(def, i === 0)));
-        main.append(rowEl);
-      });
+      this.buildMainRows();
 
       // ----- nav cluster rows -----
       const navRows = $('#kb-nav-rows');
+      navRows.innerHTML = '';
       NAV_ROWS.forEach((row, i) => {
         const rowEl = el('div', { class: 'kb-nav-row' });
         row.forEach((def) => rowEl.append(this.cap(def, i === 0)));
@@ -169,6 +180,7 @@
 
       // ----- arrows -----
       const arrows = $('#kb-arrows');
+      arrows.innerHTML = '';
       arrows.append(
         this.cap({ ...ARROW_KEYS.up, cls: 'arrow-up' }),
         this.cap({ ...ARROW_KEYS.left, cls: 'arrow-left' }),
@@ -178,6 +190,7 @@
 
       // ----- numpad grid -----
       const numpad = $('#kb-numpad');
+      numpad.innerHTML = '';
       NUMPAD_KEYS.forEach((def) => {
         const cap = this.cap(def);
         cap.style.gridColumn = def.gc;
@@ -185,9 +198,71 @@
         numpad.append(cap);
       });
 
-      Stats.kbTotal = $$('#keyboard .key[data-code]').length;
+      this.updateLayoutUI();
+      Stats.kbTotal = getLayoutKeyCount(this.layout);
       this.wire();
       this.fit();
+    },
+
+    buildMainRows() {
+      const main = $('#kb-main');
+      main.innerHTML = '';
+      const rows = KEY_LAYOUTS[this.layout] || MAIN_ROWS_ANSI;
+      rows.forEach((row, i) => {
+        const rowEl = el('div', { class: 'kb-row' + (i === 0 ? ' fn-row' : '') });
+        row.forEach((def) => rowEl.append(this.cap(def, i === 0)));
+        main.append(rowEl);
+      });
+    },
+
+    setLayout(layoutName) {
+      if (!KEY_LAYOUTS[layoutName]) return;
+      this.layout = layoutName;
+      localStorage.setItem('kmt.layout', layoutName);
+      this.buildMainRows();
+      this.updateLayoutUI();
+
+      // Restore tested state for keys in current layout
+      Stats.testedKb.forEach((code) => {
+        this.caps(code).forEach((n) => n.classList.add('is-tested'));
+      });
+      // Restore pressed/jammed state
+      this.pressed.forEach((code) => {
+        this.caps(code).forEach((n) => n.classList.add('is-press'));
+      });
+      this.jammed.forEach((code) => {
+        this.caps(code).forEach((n) => n.classList.add('is-jammed'));
+      });
+
+      Stats.kbTotal = getLayoutKeyCount(layoutName);
+      Stats.render();
+      this.fit();
+    },
+
+    updateLayoutUI() {
+      const isLaptop = this.layout === 'laptop';
+      const extras = $('.kb-extras');
+      if (extras) extras.style.display = isLaptop ? 'none' : 'flex';
+      const kb = $('#keyboard');
+      if (kb) kb.classList.toggle('is-laptop', isLaptop);
+
+      const ansiBtn = $('#layout-ansi');
+      const isoBtn = $('#layout-iso');
+      const laptopBtn = $('#layout-laptop');
+      if (ansiBtn) ansiBtn.classList.toggle('is-active', this.layout === 'ansi');
+      if (isoBtn) isoBtn.classList.toggle('is-active', this.layout === 'iso');
+      if (laptopBtn) laptopBtn.classList.toggle('is-active', this.layout === 'laptop');
+    },
+
+    unstick() {
+      this.holdTimers.forEach((t) => clearTimeout(t));
+      this.holdTimers.clear();
+      this.repeatCounts.clear();
+      this.pressed.clear();
+      this.jammed.clear();
+      this.chattered.clear();
+      $$('#keyboard .key').forEach((n) => n.classList.remove('is-press', 'is-jammed', 'is-chatter'));
+      this.updateStatusBadge('ok', 'All Keys Released');
     },
 
     // Scale the fixed-size board down to fit its container — never a scrollbar.
@@ -228,38 +303,168 @@
       nodes.forEach((n) => { n.classList.add('is-press', 'is-tested'); });
       const inLayout = nodes.length > 0;
       Stats.record('kb:' + code, name, inLayout);
-      this.setReadout(name, code);
       Feedback.click();
     },
 
     release(code) {
       this.pressed.delete(code);
-      this.caps(code).forEach((n) => n.classList.remove('is-press'));
+      this.jammed.delete(code);
+      this.caps(code).forEach((n) => n.classList.remove('is-press', 'is-jammed'));
+      if (this.pressed.size === 0) {
+        this.updateStatusBadge('ok', 'Released');
+      }
     },
 
-    setReadout(name, code, keyVal) {
+    flagJammed(code, name, repeats) {
+      this.jammed.add(code);
+      this.caps(code).forEach((n) => n.classList.add('is-jammed'));
+      this.setReadout(name, code, null, 'jammed', `⚠️ Held / Jammed (${repeats} repeats)`);
+    },
+
+    flagChatter(code, name, keyVal, gapMs) {
+      this.chattered.add(code);
+      this.caps(code).forEach((n) => n.classList.add('is-chatter'));
+      this.setReadout(name, code, keyVal, 'chatter', `⚡ Chatter / Bounce (${gapMs}ms)`);
+    },
+
+    setReadout(name, code, keyVal, statusType = 'ok', statusText = 'Active Press') {
       const r = $('#readout');
       $('#readout-key').textContent = name;
       $('#readout-code').textContent = keyVal
         ? `code: ${code}  ·  key: ${keyVal}`
         : `code: ${code}`;
+      this.updateStatusBadge(statusType, statusText);
       r.classList.remove('flash');
       void r.offsetWidth; // restart animation
       r.classList.add('flash');
     },
 
+    updateStatusBadge(type, text) {
+      const badge = $('#readout-status');
+      if (!badge) return;
+      badge.className = 'readout-status-badge ' + (
+        type === 'jammed' ? 'status-jammed' :
+        type === 'chatter' ? 'status-chatter' : 'status-ok'
+      );
+      badge.textContent = text;
+    },
+
     wire() {
       document.addEventListener('keydown', (e) => {
+        // Intercept navigation & F-keys to protect the test session
         if (this.PREVENT.has(e.code)) e.preventDefault();
-        if (e.repeat) return;
-        this.press(e.code, keyName(e.code, e.key));
-        // include the real produced character in the readout detail
-        this.setReadout(keyName(e.code, e.key), e.code, e.key);
+        if ((e.ctrlKey || e.metaKey) && this.SHORTCUT_CODES.has(e.code)) e.preventDefault();
+        if (e.altKey && (e.code === 'ArrowLeft' || e.code === 'ArrowRight')) e.preventDefault();
+
+        // Check if this is a laptop Fn multimedia combo (Volume, Media, Brightness)
+        const isMediaCombo = e.key && (
+          e.key.startsWith('AudioVolume') ||
+          e.key.startsWith('Media') ||
+          e.key.startsWith('Brightness') ||
+          e.key.startsWith('MonBrightness')
+        );
+
+        if (isMediaCombo) {
+          e.preventDefault();
+          // Illuminate Fn key to acknowledge that physical Fn combination worked!
+          this.caps('Fn').forEach((n) => n.classList.add('is-tested', 'is-press'));
+          setTimeout(() => {
+            this.caps('Fn').forEach((n) => n.classList.remove('is-press'));
+          }, 250);
+
+          const mediaName = keyName(e.code, e.key);
+          Stats.record('kb:' + (e.code || e.key), mediaName, true);
+          this.setReadout(mediaName, e.code || 'FnCombo', e.key, 'ok', 'Fn Media Combo ✓');
+          Feedback.click();
+          return;
+        }
+
+        // Double Escape triggers unstick
+        if (e.code === 'Escape') {
+          const now = performance.now();
+          if (this.lastEscPress && (now - this.lastEscPress) < 400) {
+            this.unstick();
+            return;
+          }
+          this.lastEscPress = now;
+        }
+
+        const now = performance.now();
+        const isRepeat = e.repeat;
+        const code = e.code;
+        const name = keyName(code, e.key);
+
+        // Chatter detection (switch bounce: keydown within 35ms of last keyup)
+        const lastRel = this.lastReleaseTimes.get(code);
+        let isChatter = false;
+        if (!isRepeat && lastRel && (now - lastRel) > 0 && (now - lastRel) < 35) {
+          isChatter = true;
+          this.flagChatter(code, name, e.key, Math.round(now - lastRel));
+        }
+
+        if (isRepeat) {
+          const count = (this.repeatCounts.get(code) || 0) + 1;
+          this.repeatCounts.set(code, count);
+          if (count >= 10) {
+            this.flagJammed(code, name, count);
+          }
+          return;
+        }
+
+        this.repeatCounts.set(code, 0);
+        this.pressTimes.set(code, now);
+
+        // Flag jammed if key is held down > 1.5 seconds continuously
+        clearTimeout(this.holdTimers.get(code));
+        const timer = setTimeout(() => {
+          if (this.pressed.has(code)) {
+            this.flagJammed(code, name, this.repeatCounts.get(code) || 1);
+          }
+        }, 1500);
+        this.holdTimers.set(code, timer);
+
+        this.press(code, name);
+        if (!isChatter) {
+          this.setReadout(name, code, e.key, 'ok', 'Active Press');
+        }
+
+        // Windows key handling: Windows OS intercepts the Win key to open the Start menu,
+        // which triggers window.blur and often drops the keyup event.
+        // Auto-release the active press state after 180ms so the key registers as tested
+        // without getting stuck glowing when the Start menu opens.
+        if (code === 'MetaLeft' || code === 'MetaRight') {
+          setTimeout(() => {
+            if (this.pressed.has(code)) {
+              this.release(code);
+            }
+          }, 180);
+        }
       });
-      document.addEventListener('keyup', (e) => this.release(e.code));
+
+      document.addEventListener('keyup', (e) => {
+        const now = performance.now();
+        clearTimeout(this.holdTimers.get(e.code));
+        this.holdTimers.delete(e.code);
+        this.repeatCounts.delete(e.code);
+        this.lastReleaseTimes.set(e.code, now);
+        this.release(e.code);
+      });
+
       window.addEventListener('blur', () => {
-        this.pressed.forEach((c) => this.caps(c).forEach((n) => n.classList.remove('is-press')));
+        this.pressed.forEach((c) => this.caps(c).forEach((n) => n.classList.remove('is-press', 'is-jammed')));
         this.pressed.clear();
+        this.jammed.clear();
+        this.holdTimers.forEach((t) => clearTimeout(t));
+        this.holdTimers.clear();
+      });
+
+      // Prevent accidental page reload / tab close when keys have been tested
+      window.addEventListener('beforeunload', (e) => {
+        if (Stats.total > 0) {
+          e.preventDefault();
+          e.returnValue = '';
+          return '';
+        }
       });
 
       // Touch / click support — tap the on-screen keys.
@@ -269,24 +474,79 @@
         const code = codeFrom(e.target);
         if (!code) return;
         e.preventDefault();
+        if (code === 'Fn') {
+          this.caps('Fn').forEach((n) => n.classList.toggle('is-tested'));
+          Stats.record('kb:Fn', 'Fn (Hardware/Laptop)', true);
+          this.setReadout('Fn (Hardware Key)', 'Fn', 'Embedded Controller', 'ok', 'Laptop Fn Verified');
+          Feedback.click();
+          return;
+        }
         this.press(code, keyName(code));
+        this.setReadout(keyName(code), code, null, 'ok', 'Tapped');
       });
-      const lift = (e) => { const code = codeFrom(e.target); if (code) this.release(code); };
+      const lift = (e) => {
+        const code = codeFrom(e.target);
+        if (code && code !== 'Fn') this.release(code);
+      };
       kb.addEventListener('pointerup', lift);
       kb.addEventListener('pointerleave', lift);
       kb.addEventListener('pointercancel', lift);
 
-      // Keep the board fitted to the viewport.
-      let rT;
-      window.addEventListener('resize', () => { cancelAnimationFrame(rT); rT = requestAnimationFrame(() => this.fit()); });
+      // Layout toggle buttons
+      const ansiBtn = $('#layout-ansi');
+      const isoBtn = $('#layout-iso');
+      const laptopBtn = $('#layout-laptop');
+      if (ansiBtn) ansiBtn.addEventListener('click', () => this.setLayout('ansi'));
+      if (isoBtn) isoBtn.addEventListener('click', () => this.setLayout('iso'));
+      if (laptopBtn) laptopBtn.addEventListener('click', () => this.setLayout('laptop'));
+
+      // Clear Tested Keys button (clears marked keys on keyboard)
+      const clearBtn = $('#clear-tested');
+      if (clearBtn) clearBtn.addEventListener('click', () => this.clearTested());
+
+      // Unstick button
+      const unstickBtn = $('#unstick-keys');
+      if (unstickBtn) unstickBtn.addEventListener('click', () => this.unstick());
+
+      // Modern ResizeObserver on .kb-scroll to keep board fitted
+      const scroll = $('.kb-scroll');
+      if (window.ResizeObserver && scroll) {
+        this.ro = new ResizeObserver(() => this.fit());
+        this.ro.observe(scroll);
+      } else {
+        let rT;
+        window.addEventListener('resize', () => { cancelAnimationFrame(rT); rT = requestAnimationFrame(() => this.fit()); });
+      }
       window.addEventListener('load', () => this.fit());
     },
 
-    reset() {
+    clearTested() {
+      this.holdTimers.forEach((t) => clearTimeout(t));
+      this.holdTimers.clear();
+      this.repeatCounts.clear();
       this.pressed.clear();
-      $$('#keyboard .key').forEach((n) => n.classList.remove('is-press', 'is-tested'));
+      this.jammed.clear();
+      this.chattered.clear();
+      Stats.testedKb.clear();
+      $$('#keyboard .key').forEach((n) => n.classList.remove('is-press', 'is-tested', 'is-jammed', 'is-chatter'));
+      Stats.render();
+      this.setReadout('Keys Cleared', 'Ready', null, 'ok', 'Board Cleaned');
+      Feedback.click();
+    },
+
+    reset() {
+      this.holdTimers.forEach((t) => clearTimeout(t));
+      this.holdTimers.clear();
+      this.repeatCounts.clear();
+      this.pressTimes.clear();
+      this.lastReleaseTimes.clear();
+      this.chattered.clear();
+      this.jammed.clear();
+      this.pressed.clear();
+      $$('#keyboard .key').forEach((n) => n.classList.remove('is-press', 'is-tested', 'is-jammed', 'is-chatter'));
       $('#readout-key').textContent = 'Press any key';
       $('#readout-code').textContent = 'your physical keyboard, or tap keys below';
+      this.updateStatusBadge('ok', 'Ready');
     },
   };
 
@@ -303,6 +563,12 @@
 
       const region = (b) => mouse.querySelector(`[data-button="${b}"]`);
 
+      // Prevent browser history navigation on mouse Back/Forward clicks
+      panel.addEventListener('auxclick', (e) => e.preventDefault());
+      window.addEventListener('auxclick', (e) => {
+        if (e.target.closest('#panel-mouse')) e.preventDefault();
+      });
+
       panel.addEventListener('mousedown', (e) => {
         e.preventDefault();
         const r = region(e.button);
@@ -312,7 +578,11 @@
         Stats.record('mouse:' + e.button, name, false);
         Feedback.click();
       });
-      panel.addEventListener('mouseup', (e) => { const r = region(e.button); if (r) r.classList.remove('is-press'); });
+      panel.addEventListener('mouseup', (e) => {
+        e.preventDefault();
+        const r = region(e.button);
+        if (r) r.classList.remove('is-press');
+      });
       panel.addEventListener('contextmenu', (e) => e.preventDefault());
 
       panel.addEventListener('mousemove', (e) => {
@@ -354,12 +624,27 @@
     BTN: ['A', 'B', 'X', 'Y', 'LB', 'RB', 'LT', 'RT', 'Back', 'Start',
       'L3', 'R3', 'D-Up', 'D-Down', 'D-Left', 'D-Right', 'Home'],
     raf: null,
+    active: false,
     pads: {}, // index -> { btnEls:[], stickDots:{}, stickVals:{} }
 
     init() {
       window.addEventListener('gamepadconnected', () => this.refresh());
       window.addEventListener('gamepaddisconnected', () => this.refresh());
       this.refresh();
+    },
+
+    setActive(isActive) {
+      this.active = isActive;
+      if (isActive) {
+        if (!this.raf && this.connectedList().length && !document.hidden) {
+          this.loop();
+        }
+      } else {
+        if (this.raf) {
+          cancelAnimationFrame(this.raf);
+          this.raf = null;
+        }
+      }
     },
 
     connectedList() {
@@ -377,8 +662,10 @@
         text.textContent = 'No controller detected — connect one and press any button.';
         stage.innerHTML = '';
         this.pads = {};
-        cancelAnimationFrame(this.raf);
-        this.raf = null;
+        if (this.raf) {
+          cancelAnimationFrame(this.raf);
+          this.raf = null;
+        }
         return;
       }
 
@@ -426,12 +713,15 @@
         this.pads[pad.index] = { btnEls, stickDots, stickVals, lastPressed: new Set() };
       });
 
-      if (!this.raf) this.loop();
+      if (this.active && !document.hidden && !this.raf) this.loop();
     },
 
     loop() {
       const list = this.connectedList();
-      if (!list.length) { this.raf = null; return; }
+      if (!list.length || !this.active || document.hidden) {
+        this.raf = null;
+        return;
+      }
 
       list.forEach((pad) => {
         const ui = this.pads[pad.index];
@@ -488,11 +778,48 @@
           const name = tab.dataset.tab;
           $$('.panel').forEach((p) => p.classList.toggle('is-active', p.id === 'panel-' + name));
           if (name === 'keyboard') Keyboard.fit();
+          Gamepad.setActive(name === 'gamepad');
         });
+      });
+
+      // Pause Gamepad polling when page/tab is hidden
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          if (Gamepad.raf) {
+            cancelAnimationFrame(Gamepad.raf);
+            Gamepad.raf = null;
+          }
+        } else {
+          const isGpTab = $('#panel-gamepad') && $('#panel-gamepad').classList.contains('is-active');
+          if (isGpTab) {
+            Gamepad.setActive(true);
+          }
+        }
       });
     },
 
     toolbar() {
+      // Theme toggle (Dark / Light)
+      const themeBtn = $('#toggle-theme');
+      const themeIco = $('#theme-ico');
+      let currentTheme = localStorage.getItem('kmt.theme') ||
+        (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+
+      const applyTheme = (theme) => {
+        currentTheme = theme;
+        document.documentElement.setAttribute('data-theme', theme);
+        localStorage.setItem('kmt.theme', theme);
+        if (themeIco) themeIco.textContent = theme === 'light' ? '☀️' : '🌙';
+        if (themeBtn) themeBtn.title = theme === 'light' ? 'Switch to Dark Theme' : 'Switch to Light Theme';
+      };
+      applyTheme(currentTheme);
+
+      if (themeBtn) {
+        themeBtn.addEventListener('click', () => {
+          applyTheme(currentTheme === 'light' ? 'dark' : 'light');
+        });
+      }
+
       const sound = $('#toggle-sound');
       const hap = $('#toggle-haptics');
       const sync = (btn, on) => { btn.classList.toggle('is-on', on); btn.setAttribute('aria-pressed', String(on)); };

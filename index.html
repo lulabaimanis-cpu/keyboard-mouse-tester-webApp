@@ -64,6 +64,9 @@
     </nav>
 
     <div class="toolbar">
+      <button class="icon-btn" id="toggle-theme" title="Switch Theme (Dark / Light)" aria-label="Toggle Theme">
+        <span class="ib-ico" id="theme-ico">🌙</span>
+      </button>
       <button class="icon-btn is-on" id="toggle-sound" title="Toggle key sound" aria-pressed="true">
         <span class="ib-ico">🔊</span>
       </button>
@@ -104,8 +107,24 @@
     <!-- KEYBOARD -->
     <section class="panel is-active" id="panel-keyboard" role="tabpanel">
       <div class="readout" id="readout">
-        <span class="readout-key" id="readout-key">Press any key</span>
+        <div class="readout-header">
+          <span class="readout-key" id="readout-key">Press any key</span>
+          <span class="readout-status-badge status-ok" id="readout-status">Ready</span>
+        </div>
         <span class="readout-code" id="readout-code">your physical keyboard, or tap keys below</span>
+      </div>
+
+      <div class="kb-toolbar">
+        <div class="kb-layout-toggle" role="group" aria-label="Keyboard Layout">
+          <span class="kb-toolbar-label">Layout:</span>
+          <button class="text-btn sm is-active" id="layout-ansi" data-layout="ansi">ANSI (US)</button>
+          <button class="text-btn sm" id="layout-iso" data-layout="iso">ISO (UK/EU)</button>
+          <button class="text-btn sm" id="layout-laptop" data-layout="laptop">Laptop (75%)</button>
+        </div>
+        <div class="kb-actions">
+          <button class="text-btn sm" id="clear-tested" title="Clear all marked/tested keys on the keyboard">Clear Keys</button>
+          <button class="text-btn sm warn" id="unstick-keys" title="Release any visually stuck or held keys (Esc x2)">Unstick Keys</button>
+        </div>
       </div>
 
       <div class="kb-scroll">
@@ -123,8 +142,7 @@
 
       <p class="hint">
         Tip: tap keys on screen, or press your physical keyboard. Pressed keys glow;
-        once tested they stay marked so you can spot dead keys. Some keys
-        (Win/Meta, PrtSc, some F-keys) may be intercepted by your OS or browser.
+        once tested they stay marked so you can spot dead keys. <strong>Laptop users:</strong> tombol <code>Fn</code> dikontrol hardware laptop (Embedded Controller) — uji lewat kombinasi Fn+Media atau tap tombol Fn di layar.
       </p>
     </section>
 
